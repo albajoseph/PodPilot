@@ -1,0 +1,104 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-manager
+  namespace: podpilot
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: task-manager
+  template:
+    metadata:
+      labels:
+        app: task-manager
+    spec:
+      # --- INIT CONTAINER: Collects CSS/JS before the app starts ---
+      initContainers:
+      - name: collectstatic
+        image: task-manager:latest
+        imagePullPolicy: IfNotPresent
+        command: ["python", "manage.py", "collectstatic", "--noinput"]
+        env:
+        - name: DJANGO_SETTINGS_MODULE
+          value: "task_manager.production"
+        - name: STATIC_ROOT
+          value: "/app/staticfiles"
+        - name: ALLOWED_HOSTS
+          value: "*"
+        - name: SECRET_KEY
+          valueFrom: { secretKeyRef: { name: django-secret-key, key: secret-key } }
+        volumeMounts:
+        - name: static-files
+          mountPath: /app/staticfiles
+
+      containers:
+      # --- MAIN CONTAINER: Django Web App ---
+      - name: task-manager
+        image: task-manager:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+          name: django
+        env:
+        - name: DJANGO_SETTINGS_MODULE
+          value: "task_manager.production"
+        - name: STATIC_ROOT
+          value: "/app/staticfiles"
+        - name: ALLOWED_HOSTS
+          value: "*"
+        - name: SECRET_KEY
+          valueFrom: { secretKeyRef: { name: django-secret-key, key: secret-key } }
+        - name: DB_ENGINE
+          value: "django.db.backends.postgresql"
+        - name: DB_NAME
+          valueFrom: { secretKeyRef: { name: postgres-secrets, key: database } }
+        - name: DB_USER
+          valueFrom: { secretKeyRef: { name: postgres-secrets, key: username } }
+        - name: DB_PASSWORD
+          valueFrom: { secretKeyRef: { name: postgres-secrets, key: password } }
+        - name: DB_HOST
+          value: "postgres"
+        - name: DB_PORT
+          value: "5432"
+        volumeMounts:
+        - name: static-files
+          mountPath: /app/staticfiles
+        resources:
+          requests: { cpu: "100m", memory: "128Mi" }
+          limits: { cpu: "200m", memory: "256Mi" }
+        readinessProbe:
+          httpGet: { path: /health, port: 8000 }
+          initialDelaySeconds: 10
+        livenessProbe:
+          httpGet: { path: /ready, port: 8000 }
+          initialDelaySeconds: 15
+
+      # --- SIDECAR CONTAINER: Nginx ---
+      - name: nginx
+        image: nginx:latest
+        ports:
+        - containerPort: 80
+          name: http
+        volumeMounts:
+        - name: static-files
+          mountPath: /usr/share/nginx/html/static
+          readOnly: true
+        - name: nginx-config
+          mountPath: /etc/nginx/conf.d
+          readOnly: true
+        resources:
+          requests: { cpu: "50m", memory: "64Mi" }
+          limits: { cpu: "100m", memory: "128Mi" }
+        readinessProbe:
+          httpGet: { path: /health, port: 80 }
+        livenessProbe:
+          httpGet: { path: /health, port: 80 }
+
+      # --- SHARED VOLUMES ---
+      volumes:
+      - name: static-files
+        emptyDir: {}
+      - name: nginx-config
+        configMap:
+          name: task-manager-nginx-config
